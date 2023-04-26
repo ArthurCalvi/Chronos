@@ -66,6 +66,7 @@ config = {
         # },
         'qa': ['QA_PIXEL'],
         'qa_cloud' : [22280],
+        'qa_nodata' : [1],
         'start': datetime(2013, 1, 1),
         'end': datetime(2030, 1, 1),
         'reflectance': lambda x: (x * 2.75e-5 - 0.2),
@@ -103,6 +104,7 @@ config = {
         'crswir_coeffs':[(1650-835)/(2215-835)],
         'qa': ['QA_PIXEL'],
         'qa_cloud' : [5896],
+        'qa_nodata' : [1],
         'start': datetime(2000, 1, 1),
         'end': datetime(2014, 1, 1),
         'reflectance': lambda x: (x * 2.75e-5 - 0.2),
@@ -135,6 +137,7 @@ config = {
         'crswir_coeffs':[(1650-830)/(2215-830)],
         'qa': ['QA_PIXEL'],
         'qa_cloud' : [5896],
+        'qa_nodata' : [1],
         'start': datetime(1984, 1, 1),
         'end': datetime(2014, 1, 1),
         'reflectance': lambda x: (x * 2.75e-5 - 0.2),
@@ -165,6 +168,7 @@ config = {
         'crswir_coeffs':[(1610-842)/(2190-842)],
         'qa': ['SCL'],
         'qa_cloud' : [9],
+        'qa_nodata' : [0],
         'start': datetime(2017, 1, 1),
         'end': datetime(2030, 1, 1),
         'reflectance': lambda x: (x * 1e-4),
@@ -267,6 +271,8 @@ def get_pansharpened(item, config, arr, transfo, geometry_buffer):
     
 def get_sats(start, end, config, priority):
     sats = []
+    start = datetime(year=start.year, month=start.month, day=start.day)
+    end = datetime(year=end.year, month=end.month, day=end.day)
     for key in config:
         start_sat = config[key]['start']
         end_sat = config[key]['end']
@@ -327,18 +333,23 @@ def check_intervals(date, dates_hole, delta_min):
     
     return False 
     
-def get_cc(item, geometry, disturbance, config):
+def get_cc(item, geometry, daoi:dict, config):
+
     sat = dplatform[ item.properties['platform'] ]
-    try:
-        crs, transfo, qa, _ = item.assets.crop_as_array(config[sat]['qa'][0], bbox= shape(geometry).bounds)
-        qa_on_disturbance = qa[:,disturbance.astype('bool')].reshape(-1)
-        if dplatform[item.properties['platform']] == 'landsat-7':
-            coeff = (qa_on_disturbance == 1).mean() #SLC failure taken as cloud-cover
-        else :
-            coeff = 0
-        return ((qa_on_disturbance == config[sat]['qa_cloud'][0]).sum() / qa_on_disturbance.shape[0] + coeff ) * 100
-    except:
-        return 100
+    disturbance = daoi[sat]
+    # try:
+
+    #retrieve QA band
+    crs, transfo, qa, _ = item.assets.crop_as_array(config[sat]['qa'][0], bbox= shape(geometry).bounds)
+    qa_on_disturbance = qa[:,disturbance.astype('bool')].reshape(-1)
+
+    #compute nodata and cloud cover
+    nodata = (qa_on_disturbance == config[sat]['qa_nodata'][0]).mean() * 100
+    cc = (qa_on_disturbance == config[sat]['qa_cloud'][0]).mean() * 100
+
+    return cc, nodata 
+    # except:
+    #     return 100, 100 
     
 from skimage.transform import resize
 
@@ -470,15 +481,15 @@ def preprocessing(crs, transfo, arr, item, bands, config_sat, geometry, target=N
 
     return crs, transfo, arr
 
-def spectral_calibration(arr, bands, coeffs):
+# def spectral_calibration(arr, bands, coeffs):
     
-    f = lambda x,a,b: (x-b)/a 
+#     f = lambda x,a,b: (x-b)/a 
 
-    for i in range(len(bands)):
-        b, a = coeffs[bands[i]]
-        arr[i] = f(arr[i], a, b)
+#     for i in range(len(bands)):
+#         b, a = coeffs[bands[i]]
+#         arr[i] = f(arr[i], a, b)
 
-    return arr 
+#     return arr 
 
 def wrapper_item_target(item_target, band, geometry, config):
     
@@ -569,9 +580,9 @@ class Chronos():
 
         if step : 
             aoi = rasterize([transform_geom('epsg:3857', crs, old_geometry.buffer(100).convex_hull)], out_shape = arr.shape[1:], transform=transfo, fill=np.nan, all_touched=False)
-            cloud_cover = Parallel(n_jobs=self.n_jobs, prefer=self.prefer, verbose=self.verbose)(delayed(get_cc)(item, geometry, aoi, config) for item in items_prob)
-            indexes_cc_ok = (np.array(cloud_cover) < self.cc1)
-            cloud_cover = np.array(cloud_cover)[indexes_cc_ok]
+            cc_nodata = Parallel(n_jobs=self.n_jobs, prefer=self.prefer, verbose=self.verbose)(delayed(get_cc)(item, geometry, aoi, config) for item in items_prob)
+            indexes_cc_ok = (np.array(cc_nodata)[:,0] < self.cc1)
+            cloud_cover = np.array(cc_nodata)[indexes_cc_ok, 0]
             items_cc_ok = [items_prob[i] for i in range(len(items_prob)) if indexes_cc_ok[i]]
 
             #update CC:
