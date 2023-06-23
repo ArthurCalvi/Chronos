@@ -15,6 +15,25 @@ import rasterio
 
 from config import dplatform, config, dsatellite
 
+#registration
+# from itsr.registration import main
+# from itsr.utils import group_by_n 
+from registration import main
+
+def _registration_(folder, outdir, extra_inputs=None, extra_outputs=None):
+    inputs = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.tif')]
+    outputs = [os.path.join(outdir, f) for f in os.listdir(folder) if f.endswith('.tif')]
+    print('inputs:', inputs[0])
+    print('outputs:', outputs[0])
+    print('extra_outputs:')
+    for i in extra_outputs:
+        print(i[0])
+    print('extra_inputs:')
+    for i in extra_inputs:
+        print(i[0])
+    #switch to main in registration.py 
+    main(inputs, outputs, extra_inputs=extra_inputs, extra_outputs=extra_outputs)
+
 #utils
 def write_tif(arr, transfo, crs, direction, item, indice, dtype='uint16', normalization=None, scaling=True):
     """Write a GeoTiFF from an array
@@ -95,14 +114,16 @@ def get_pansharpened(item, config, arr, transfo, geometry_buffer):
         cst = metadata['LANDSAT_METADATA_FILE']['LEVEL1_RADIOMETRIC_RESCALING']
         add = float(cst['REFLECTANCE_ADD_BAND_8'])
         mult = float(cst['REFLECTANCE_MULT_BAND_8'])
-        pan = item_pan.assets.crop_as_array(config[sat]['pan']['pan_band'], bbox= shape(geometry_buffer).bounds)
-        pan = (mult * (pan[2].squeeze()) + add) 
+        crs_pan, transfo_pan, arr_pan, _ = item_pan.assets.crop_as_array(config[sat]['pan']['pan_band'], bbox= shape(geometry_buffer).bounds)
+        pan = (mult * (arr_pan.squeeze()) + add) 
         #pan-sharpening
         pansharpened = pansharpen(arr, pan, method='pca',interpolation_order=3 ,with_nir=False)
         transfo = transfo * transfo.scale((arr.shape[1] / pansharpened.shape[1]),\
                                         (arr.shape[2] / pansharpened.shape[2]))
+        # print('transfo: ', transfo)
+        # print('transfo_pan: ', transfo_pan)
         pansharpened = histogram_match_pansharpen_visual(pansharpened, arr)
-        return pansharpened, transfo, True
+        return pansharpened, transfo_pan, True
     except:
         return arr, transfo, False
     

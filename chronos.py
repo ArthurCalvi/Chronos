@@ -6,16 +6,18 @@ import pandas as pd
 import numpy as np
 import os 
 from copy import deepcopy
+import shutil
+import rasterio
 
 from config import config, priority, dplatform
-from utils import research_items, get_sats, get_nd, get_cc, get_res, select_dates, check_intervals, wrapper_item_target, get_indices
+from utils import research_items, get_sats, get_nd, get_cc, get_res, select_dates, check_intervals, wrapper_item_target, get_indices, _registration_
 
 
 class Chronos():
 
     def __init__(self, delta_min:int, cc1=5, cc2=75, buffer=3000, nodata=10, \
                  alpha = 0.1, show_aoi = False, dtype='uint16', \
-                 shadow = False, 
+                 shadow = False, registration=True,
                  pansharpening=True, sharpening=True, force_reproject=False,\
                  normalization=None, verbose=0, n_jobs=-1, prefer='threads') -> None:
         
@@ -57,6 +59,7 @@ class Chronos():
         self.n_jobs = n_jobs
         self.prefer = prefer
         self.dtype = dtype 
+        self.registration = registration
         self.count_sat = dict()
 
         assert self.dtype in ['uint8', 'uint16'], 'dtype should be either uint8 or uint16'
@@ -192,112 +195,6 @@ class Chronos():
 
             return items_kept, geometry, geometry_buffer, old_geometry
 
-    # def research_(self, geometry, start_date, end_date):
-    #     """Research items
-
-    #     Args:
-    #         geometry (_type_): in crs 4326
-    #         start_date (_type_): _description_
-    #         end_date (_type_): _description_
-    #         buffer (int, optional): in meters. Defaults to 3000.
-    #     """
-    #     show = False
-    #     if self.verbose > 2:
-    #         show = True
-
-
-    #     #geometry
-    #     old_geometry = deepcopy(geometry)
-    #     geometry = transform_geom('epsg:3857', 'epsg:4326', shape(old_geometry).convex_hull)
-    #     geometry_buffer = transform_geom('epsg:3857', 'epsg:4326', shape(old_geometry).convex_hull.buffer(self.buffer))
-
-    #     #sats 
-    #     self.sats = get_sats(start_date, end_date, config, priority)
-    #     for sat in self.sats:
-    #         self.count_sat[sat] = 0
-
-    #     if self.verbose > 0:
-    #         print('satellites used: ', self.sats)
-
-    #     items1 = research_items(geometry, start_date, end_date, self.sats, config, self.cc1)
-    #     if self.verbose > 0:
-    #         print(f'Items found for research 1 with cc={self.cc1} : {len(items1)}')
-
-    #     x = [item.properties['datetime'] for item in items1]
-    #     y = [self.sats.index( dplatform[ item.properties['platform'] ]) for item in items1]
-
-    #     #gap
-    #     df = pd.DataFrame(data=np.array([x,y]).T, columns=['date', 'sat'])
-    #     df['gap'] = (df.date - df.date.shift()).dt.days
-    #     df['hole'] = (df.gap > self.delta_min * 2)
-    #     dates_hole = [[df.date.iloc[x-1], df.date.iloc[x]] for x in df.index.to_numpy()[df.hole]]
-
-    #     #research 2 
-    #     items2 = research_items(geometry, start_date, end_date, self.sats, config, self.cc2)
-    #     dates = [item.properties['datetime'] for item in items2]
-    #     indexes_prob = [check_intervals(date, dates_hole, self.delta_min//2) for date in dates]
-    #     items_prob = [items2[i] for i in range(len(items2)) if indexes_prob[i]]
-
-        
-    #     step = False
-    #     i = 0 
-    #     while not step:
-    #         item = items2[i]
-    #         try :
-    #             crs, transfo, arr, _ = item.assets.crop_as_array(config[ dplatform[ item.properties['platform'] ] ]['all_bands'][0], bbox= shape(geometry).bounds)
-    #             step = True
-    #         except :
-    #             pass
-    #         i += 1
-
-    #     if step : 
-    #         aoi = rasterize([transform_geom('epsg:3857', crs, old_geometry.buffer(100).convex_hull)], out_shape = arr.shape[1:], transform=transfo, fill=np.nan, all_touched=False)
-    #         cc_nodata = Parallel(n_jobs=self.n_jobs, prefer=self.prefer, verbose=self.verbose)(delayed(get_cc)(item, geometry, aoi, config) for item in items_prob)
-    #         indexes_cc_ok = (np.array(cc_nodata)[:,0] < self.cc1)
-    #         cloud_cover = np.array(cc_nodata)[indexes_cc_ok, 0]
-    #         items_cc_ok = [items_prob[i] for i in range(len(items_prob)) if indexes_cc_ok[i]]
-
-    #         #update CC:
-    #         for i,item in enumerate(items_cc_ok):
-    #             item.properties['eo:cloud_cover'] = cloud_cover[i]
-
-    #         if self.verbose > 0:
-    #             print(f'Items found for research 2 with cc={self.cc1} (on aoi) : {len(items2)}')
-
-    #         #assembling
-    #         items1.extend(items_cc_ok)
-    #         items1 = sorted(items1, key=lambda x:x.properties['datetime'])
-    #         if self.verbose > 0:
-    #             print('Items found for combined research: ', len(items1))
-
-    #         #filtering
-    #         x = [item.properties['datetime'] for item in items1]
-    #         cc = [item.properties['eo:cloud_cover'] for item in items1]
-    #         y = [self.sats.index(dplatform[ item.properties['platform'] ]) for item in items1]
-    #         df = pd.DataFrame(data=np.array([x,y,cc]).T, columns=['date', 'sat', 'cc'])
-    #         items_kept = select_items(df, items1, self.delta_min, show)
-    #         if self.verbose > 0:
-    #             print('Items selected to evenly space the data: ', len(items_kept))
-            
-    #         #count per satellite
-    #         for item in items_kept:
-    #             self.count_sat[ dplatform[ item.properties['platform'] ] ] = self.count_sat[ dplatform[ item.properties['platform'] ] ] + 1
-
-    #         if self.verbose>1:
-    #             fig, ax = plt.subplots(figsize=(8,2))
-    #             for sat in df['sat'].unique():
-    #                 dfplot = df[ df.sat == sat ]
-    #                 dfplot.plot.scatter(ax=ax, x='date',y='cc', c=f'C{sat}', marker='+', label=self.sats[sat], legend=True)
-    #             # ax.set_yticks(range(len(self.sats)))
-    #             # ax.set_yticklabels(self.sats)
-    #             ax.grid(True, linestyle='--', lw=0.5)
-    #             plt.show()
-
-    #         return items_kept, geometry, geometry_buffer, old_geometry
-        
-    #     else :
-    #         'research failed'
-
 
     def download(self, folder:str, geometry:dict, start_date, end_date, indices=['rgb']):
         """Downlaod items
@@ -308,7 +205,6 @@ class Chronos():
             start_date (_type_): _description_
             end_date (_type_): _description_
             indices (list, optional): _description_. Defaults to ['rgb'].
-            aoi (_type_, optional): _description_. Defaults to None.
         """
 
         log_path = os.path.join(folder,'download.txt')
@@ -375,3 +271,73 @@ class Chronos():
         
         
 
+    def get_registration(self, folder, keep_only_common=False, remove_old=False):
+
+        indices = os.listdir(folder)
+        indices = [x for x in indices if os.path.isdir(os.path.join(folder, x))]
+        targets = [x for x in indices if x not in ['temp', 'qa', 'cloud_mask']]
+
+        if len(targets) > 1:
+            if 'rgb' in targets:
+                target = 'rgb'
+            else :
+                target = targets[0]
+
+            targets = [x for x in targets if x != target]
+            
+            extra_inputs = [] 
+            extra_outputs = []
+            for indice in targets:
+                extra_inputs.append([os.path.join(folder, indice, x) for x in os.listdir(os.path.join(folder, indice)) if x.endswith('.tif')])
+                extra_outputs.append([os.path.join(folder, indice+'_r', x) for x in os.listdir(os.path.join(folder, indice)) if x.endswith('.tif')])
+        else :
+            extra_inputs = None
+            extra_outputs = None 
+
+        if self.verbose > 0:    
+            print('Starting registration...')
+
+        
+        _registration_(os.path.join(folder, target), outdir=os.path.join(folder, target+'_r'),\
+                      extra_inputs=extra_inputs, extra_outputs=extra_outputs)
+
+        #get files to delete by looking at the file present in the folder target but not in the folder target_r
+        for indice in targets:
+            files = os.listdir(os.path.join(folder, indice))
+            files_r = os.listdir(os.path.join(folder, indice+'_r'))
+            deleted_files = set(files) - set(files_r)
+            if self.verbose > 1:
+                print('files to remove: ', deleted_files) 
+
+        #remove not registered files and rename files
+        if remove_old:
+            for indice in targets+[target]:
+                shutil.rmtree(os.path.join(folder, indice))
+                os.rename(os.path.join(folder, indice+'_r'), os.path.join(folder, indice))
+
+        #remove files not registered
+        if keep_only_common:
+            for indice in targets+[target]:
+                for file in deleted_files:
+                    os.remove(os.path.join(folder, target, file))
+        
+    def dl_pipeline(self, geometry, start_date, end_date, folder, indices=['rgb'], remove_old=False, keep_only_common=False):
+        """Download pipeline
+
+        Download + registration 
+
+        Args:
+            geometry (dict): _description_
+            start_date (datetime.datetime): starting date of the time series
+            end_date (datetime.datetime): ending date of the time series
+            folder (str): folder to download
+            indices (list, optional): Indices you want to download. Defaults to ['rgb']. 
+            remove_old (bool, optional): Remove old files. Defaults to False.
+            keep_only_common (bool, optional): Keep only common files. Defaults to False.
+        """
+
+        #download
+        self.download(folder, geometry, start_date, end_date, indices=indices)
+
+        #registration
+        self.get_registration(folder, remove_old=remove_old, keep_only_common=keep_only_common)
