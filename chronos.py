@@ -15,9 +15,9 @@ from utils import research_items, get_sats, get_nd, get_cc, get_res, select_date
 
 class Chronos():
 
-    def __init__(self, delta_min:int, cc1=5, cc2=75, buffer=3000, nodata=10, \
-                 alpha = 0.1, show_aoi = False, dtype='uint16', \
-                 shadow = False, registration=True,
+    def __init__(self, delta_min:int, cc1=5, cc2=75, buffer=3000, nodata=10, crs=None, \
+                 alpha = 0.1, show_aoi = False, dtype='uint16', satellites=None, \
+                 shadow = False, registration=True, 
                  pansharpening=True, sharpening=True, force_reproject=False,\
                  normalization=None, verbose=0, n_jobs=-1, prefer='threads') -> None:
         
@@ -31,6 +31,7 @@ class Chronos():
         - cc2: int, cloud cover threshold for the second research
         - buffer: int, buffer in meters around the geometry
         - nodata: int, nodata threshold 
+        - crs: str, crs used for the geometry
         - alpha: float, parameter to weight between the two objectives in the Dijsktra algoritm, 
                 alpha=0.1 is equally balancing the two objectives : minimizing spatial resolution, 
                 cloud cover and no data percentage & having a dense time serie (fix period between two acquisitions)
@@ -44,6 +45,8 @@ class Chronos():
         """
 
         self.delta_min = delta_min
+        self.crs = crs
+        self.satellites = satellites 
         self.cc1 = cc1
         self.cc2 = cc2
         self.nodata = nodata
@@ -63,25 +66,30 @@ class Chronos():
         self.count_sat = dict()
 
         assert self.dtype in ['uint8', 'uint16'], 'dtype should be either uint8 or uint16'
+        assert self.crs is not None, "Please specify a crs used for the geometry with crs='epsg:XXXX'"
         
         
     def research(self, geometry, start_date, end_date):
 
         #geometry
         old_geometry = deepcopy(geometry)
-        geometry = transform_geom('epsg:3857', 'epsg:4326', shape(old_geometry).convex_hull)
-        geometry_buffer = transform_geom('epsg:3857', 'epsg:4326', shape(old_geometry).convex_hull.buffer(self.buffer))
+        geometry = transform_geom(self.crs, 'epsg:4326', shape(old_geometry).convex_hull)
+        geometry_buffer = transform_geom(self.crs, 'epsg:4326', shape(old_geometry).convex_hull.buffer(self.buffer))
 
         #sats 
         self.count_sat = {}
         self.sats = get_sats(start_date, end_date, config, priority)
+        if self.satellites is not None:
+            self.sats = [sat for sat in self.sats if sat in self.satellites]
+
         if self.verbose > 0:
-            print(self.sats)
+            print('satellites used:', self.sats)
 
         for sat in self.sats:
             self.count_sat[sat] = 0
 
         #RESEARCH 1
+        #TODO: add a check on the number of items found for the first research, SHOULD BE > 0
         items1 = research_items(geometry, start_date, end_date, self.sats, config, self.cc1)
 
         #retrieve crs, transform and array for each sat
@@ -105,7 +113,7 @@ class Chronos():
         #retrieve aoi for each sat
         daoi = {}
         for sat in items1_sat:
-            daoi[sat] = rasterize([transform_geom('epsg:3857', items1_prop[sat]['crs'] , old_geometry.buffer(100).convex_hull)], out_shape = items1_prop[sat]['arr'].shape[1:], transform=items1_prop[sat]['transfo'], fill=np.nan, all_touched=False)
+            daoi[sat] = rasterize([transform_geom(self.crs, items1_prop[sat]['crs'] , old_geometry.buffer(100).convex_hull)], out_shape = items1_prop[sat]['arr'].shape[1:], transform=items1_prop[sat]['transfo'], fill=np.nan, all_touched=False)
 
         #research and filter for landsat-7
         _ = Parallel(n_jobs=self.n_jobs, prefer=self.prefer, verbose=self.verbose)(delayed(get_nd)(item, daoi, geometry, shadow=self.shadow) for item in items1)
@@ -127,10 +135,13 @@ class Chronos():
         indexes_prob = [check_intervals(date, dates_hole, 1) for date in dates]
         items_prob = [items2[i] for i in range(len(items2)) if indexes_prob[i]]
 
-
         #retrieve crs, transform and array for each sat 
         items2_sat = set([dplatform[item.properties['platform']] for item in items2])
         items2_prop = items1_prop
+        for sat in items2_sat:
+            items2_prop.setdefault(sat, None)
+        
+
         if not sorted(items2_sat) == sorted(items1_sat):
             for sat in items2_sat:
                 if sat not in items1_sat:
@@ -140,11 +151,12 @@ class Chronos():
                     while items2_prop[sat] is None and i < len(temp_items2):
                         item = temp_items2[i]
                         try :
-                            crs, transfo, arr, _ = item.assets.crop_as_array(config[ dplatform[ item.properties['platform'] ] ]['qa'][0], bbox= shape(geometry).bounds)
+                            crs, transfo, arr, _ = item.assets.crop_as_array(config[ dplatform[ item.properties['platform'] ] ]['qa_bands'][0], bbox= shape(geometry).bounds)
                             items2_prop[sat] = {'crs':crs, 'transfo':transfo, 'arr':arr}
                         except :
                             pass
                         i += 1
+
 
         items2 = [item for item in items2 if items2_prop[dplatform[item.properties['platform']]] is not None]
         items2_sat = [sat for sat in items2_sat if items2_prop[sat] is not None]
@@ -152,9 +164,10 @@ class Chronos():
         if len(items2) > 0:
             daoi = {}
             for sat in items2_sat:
-                daoi[sat] = rasterize([transform_geom('epsg:3857', items2_prop[sat]['crs'] , old_geometry.buffer(100).convex_hull)], out_shape = items2_prop[sat]['arr'].shape[1:], transform=items2_prop[sat]['transfo'], fill=np.nan, all_touched=False)
-            cc_nodata = Parallel(n_jobs=self.n_jobs, prefer=self.prefer, verbose=self.verbose)(delayed(get_cc)(item, geometry, daoi, config, shadow=self.shadow) for item in items_prob)
-            indexes_cc_ok = (np.array(cc_nodata)[:,0] < 10) #cc < 10%
+                daoi[sat] = rasterize([transform_geom(self.crs, items2_prop[sat]['crs'] , old_geometry.buffer(100).convex_hull)], out_shape = items2_prop[sat]['arr'].shape[1:], transform=items2_prop[sat]['transfo'], fill=np.nan, all_touched=False)
+            cc_nodata = Parallel(n_jobs=self.n_jobs, prefer=self.prefer,  verbose=self.verbose)(delayed(get_cc)(item, geometry, daoi, config, shadow=self.shadow) for item in items_prob)
+  
+            indexes_cc_ok = (np.array(cc_nodata)[:,0] < 25) #cc < 10%
             indexes_nodata_ok = (np.array(cc_nodata)[:,1] < self.nodata) #nodata < 10%
             cloud_cover = np.array(cc_nodata)[indexes_cc_ok, 0]
             nodata_cover = np.array(cc_nodata)[indexes_nodata_ok, 1]
@@ -166,7 +179,7 @@ class Chronos():
                 item.properties['nodata'] = nodata_cover[i]
 
             if self.verbose > 0:
-                print(f'Items found for research 2 with cc=25 (on aoi) : {len(items2)}')
+                print(f'Items accepted during research 2 with cc=25 (on aoi) : {len(items_ok)}')
 
             #assembling
             items1.extend(items_ok)
@@ -184,16 +197,24 @@ class Chronos():
             y = [self.sats.index(dplatform[ item.properties['platform'] ]) for item in items1]
             df = pd.DataFrame(data=np.array([x,y,cc,nd, res]).T, columns=['date', 'sat', 'cc', 'nodata', 'resolution'])
 
-            
-            #select items
-            df = select_dates(df, target_weight=30, lower_bound=20, alpha=self.alpha, verbose=self.verbose, cc_ub=10, sr_ub=30, nd_ub=self.nodata)
-            items_kept = [items1[i] for i in df.index.to_numpy()[df.selected == 1]]
-            
-            #count per satellite
-            for item in items_kept:
-                self.count_sat[ dplatform[ item.properties['platform'] ] ] = self.count_sat[ dplatform[ item.properties['platform'] ] ] + 1
+            if len(x) > 0:
+                #select items
+                df = select_dates(df, target_weight=30, lower_bound=20, alpha=self.alpha, verbose=self.verbose, cc_ub=10, sr_ub=30, nd_ub=self.nodata)
+                if df is not None:
+                    items_kept = [items1[i] for i in df.index.to_numpy()[df.selected == 1]]
+                else :
+                    #one item over 2 is kept
+                    items_kept = [items1[i] for i in range(len(items1)) if i%2 == 0]
+                    print('One item over 2 is kept')
+                
+                #count per satellite
+                for item in items_kept:
+                    self.count_sat[ dplatform[ item.properties['platform'] ] ] = self.count_sat[ dplatform[ item.properties['platform'] ] ] + 1
 
-            return items_kept, geometry, geometry_buffer, old_geometry
+                return items_kept, geometry, geometry_buffer, old_geometry
+            else :
+                print('Critical Issue with the tile')
+                return None, geometry, geometry_buffer, old_geometry
 
 
     def download(self, folder:str, geometry:dict, start_date, end_date, indices=['rgb']):
@@ -201,19 +222,23 @@ class Chronos():
 
         Args:
             folder (str): folder to download 
-            geometry (dict): _description_
+            geometry (dict): __geo_interface__ dict 
             start_date (_type_): _description_
             end_date (_type_): _description_
             indices (list, optional): _description_. Defaults to ['rgb'].
         """
 
-        log_path = os.path.join(folder,'download.txt')
+        log_path = os.path.join(folder,'log-frames.txt')
         os.makedirs(folder, exist_ok=True)
         with open(log_path, 'w') as f:
             f.write('-- Chronos download log --\n')
 
         #research
         items, geometry, geometry_buffer, old_geometry = self.research(geometry, start_date, end_date)
+        if items is None:
+            with open(os.path.join(log_path), 'w') as f:
+                f.write('Critical issue with the tile \n')
+            return None
 
         #target
         target = {'sat':None, 'band':None, 'res':100, 'crs':None, 'transform':None, 'shape':None}
@@ -249,14 +274,14 @@ class Chronos():
             #show aoi
             aoi = None 
             if self.show_aoi:
-                aoi = rasterize([transform_geom('epsg:3857', crs_target, old_geometry.buffer(100).convex_hull.boundary)], \
+                aoi = rasterize([transform_geom(self.crs, crs_target, old_geometry.buffer(100).convex_hull.boundary)], \
                                 out_shape = arr_target.shape[1:], transform=transfo_target, fill=np.nan, all_touched=False)
 
             #download 
             if self.verbose > 0:
                 print('Starting download at: ', folder)
 
-            return Parallel(n_jobs=self.n_jobs, prefer=self.prefer, verbose=self.verbose)\
+            return Parallel(n_jobs=self.n_jobs, prefer=self.prefer,  verbose=self.verbose)\
                 (delayed(get_indices)(folder, item, config[dplatform[item.properties['platform']]],\
                                     shape(geometry_buffer).envelope, log_path=log_path, indices=indices, target=target, aoi=aoi, \
                                         force_reproject=self.force_reproject, pansharpening=self.pansharpening, \
@@ -321,7 +346,7 @@ class Chronos():
                 for file in deleted_files:
                     os.remove(os.path.join(folder, target, file))
         
-    def dl_pipeline(self, geometry, start_date, end_date, folder, indices=['rgb'], remove_old=False, keep_only_common=False):
+    def dl_pipeline(self, geometry, start_date, end_date, folder, indices=['rgb'], remove_old=False, keep_only_common=False, registration=True):
         """Download pipeline
 
         Download + registration 
@@ -340,4 +365,5 @@ class Chronos():
         self.download(folder, geometry, start_date, end_date, indices=indices)
 
         #registration
-        self.get_registration(folder, remove_old=remove_old, keep_only_common=keep_only_common)
+        if registration:
+            self.get_registration(folder, remove_old=remove_old, keep_only_common=keep_only_common)

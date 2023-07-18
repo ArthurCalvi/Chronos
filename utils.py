@@ -135,7 +135,7 @@ def get_sats(start, end, config, priority):
     for key in config:
         start_sat = config[key]['start']
         end_sat = config[key]['end']
-        if (start_sat < start and end_sat > start) or (start_sat < end and end_sat > end):
+        if (start_sat <= end) and (start <= end_sat):
             sats.append(key)
 
     return [x for _, x in sorted(zip(priority, sats))]
@@ -410,7 +410,11 @@ def select_dates(df, target_weight=30, lower_bound=20, alpha=0.1, verbose=0, cc_
                 time_diff_end = abs(possible_end_date - end_date)
 
                 if time_diff_end <= buffer:
-                    path = nx.shortest_path(graph, i, j, weight=lambda u, v, d: weight_function(u, v, graph, alpha))
+
+                    try :
+                        path = nx.shortest_path(graph, i, j, weight=lambda u, v, d: weight_function(u, v, graph, alpha))
+                    except:
+                        continue
 
                     if path is not None:
                         #compute metrics
@@ -425,6 +429,10 @@ def select_dates(df, target_weight=30, lower_bound=20, alpha=0.1, verbose=0, cc_
     scores, _  = get_scores(graph, graph.nodes(), cc_ub=cc_ub, sr_ub=sr_ub, nd_ub=nd_ub)
     x = [graph.nodes[n]['date'] for n in graph.nodes()]
 
+    if shortest_path is None:
+        print('No path found')
+        return None
+    
     if verbose > 1:
         plt.figure(figsize=(20, 10))
         plt.scatter(x, scores, s=15, color='green', alpha=0.5)
@@ -552,7 +560,7 @@ def get_indices(folder, item, config_sat, geometry, log_path=None, indices=['rgb
 
         if log_path is not None:
             with open(log_path, 'a') as f:
-                f.write(f'indice : {indice}' + log + '\n')
+                f.write('{:<25s}'.format(f'indice: {indice}') + log + '\n')
         
         #computing indice :
         c = None
@@ -586,7 +594,8 @@ def get_indices(folder, item, config_sat, geometry, log_path=None, indices=['rgb
 def preprocessing(crs, transfo, arr, item, config_sat, geometry, only_projection=False, target=None, \
                    force_reproject=False, pansharpening=False, sharpening=True, resampling=rasterio.enums.Resampling.cubic):
     
-    
+    osr = transfo.a 
+
     #Conv to reflectance
     if not only_projection:
         arr = config_sat['reflectance'](arr) 
@@ -627,7 +636,9 @@ def preprocessing(crs, transfo, arr, item, config_sat, geometry, only_projection
         date: {item.properties['datetime']}, \
         pansharpening: {pansharpening}, \
         sharpening: {sharpening}, \
-        projected spatial resolution: {transfo.a}"
+        original spatial resolution: {osr}"
+    
+    log = "{:<25s} | {:<25s} | {:<25s} | {:<25s} | {:<25s}".format(*log.split(','))
 
     return crs, transfo, arr, str(log)
 
